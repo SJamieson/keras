@@ -5,6 +5,8 @@ Reference: "Auto-Encoding Variational Bayes" https://arxiv.org/abs/1312.6114
 import numpy as np
 import matplotlib.pyplot as plt
 
+import sys
+sys.path.insert(0, '../keras')
 from keras.layers import Input, Dense, Lambda, Flatten, Reshape
 from keras.layers import Convolution2D, Deconvolution2D, MaxPooling2D
 from keras.models import Model
@@ -39,7 +41,7 @@ def sampling(args):
     z_mean, z_log_std = args
     epsilon = K.random_normal(shape=(batch_size, latent_dim),
                               mean=0., std=epsilon_std)
-    return z_mean + K.exp(z_log_std) * epsilon
+    return z_mean + K.exp(2 * z_log_std) * epsilon
 
 # note that "output_shape" isn't necessary with the TensorFlow backend
 # so you could write `Lambda(sampling)([z_mean, z_log_std])`
@@ -58,15 +60,33 @@ c_decoded = decoder_c(f_decoded)
 x_decoded_mean = decoder_mean(c_decoded)
 
 
+# Set prior mean and std as parameters and find their MLEs
+z_mean_prior = Dense(latent_dim, init='normal', bias=False, name='z_mean_prior')
+z_mean_prior.build((batch_size, 1))
+z_mean_prior.built = True # this is stupid
+prior_mean = z_mean_prior.W[0, None, :]
+z_log_std_prior = Dense(latent_dim, init='normal', bias=False, name='z_log_std_prior')
+z_log_std_prior.build((batch_size, 1))
+z_log_std_prior.built = True # this is stupid
+prior_log_sigma = z_log_std_prior.W[0, None, :]
+
 def vae_loss(x, x_decoded_mean):
     # NOTE: binary_crossentropy expects a batch_size by dim for x and x_decoded_mean, so we MUST flatten these!
     x = K.flatten(x)
     x_decoded_mean = K.flatten(x_decoded_mean)
     xent_loss = objectives.binary_crossentropy(x, x_decoded_mean)
-    kl_loss = - 0.5 * K.mean(1 + z_log_std - K.square(z_mean) - K.exp(z_log_std), axis=-1)
+    kl_loss = K.sum(
+        prior_log_sigma - z_log_std
+        + 0.5 * (
+            K.exp(2 * z_log_std) + K.square(z_mean - prior_mean)
+            ) / K.exp(2 * prior_log_sigma)
+        - 0.5, axis=-1)
+    # kl_loss = - 0.5 * K.mean(1 + z_log_std - K.square(z_mean) - K.exp(z_log_std), axis=-1)
     return xent_loss + kl_loss
 
 vae = Model(x, x_decoded_mean)
+vae.layers.append(z_mean_prior)
+vae.layers.append(z_log_std_prior)
 vae.compile(optimizer='rmsprop', loss=vae_loss)
 vae.summary()
 
@@ -76,11 +96,13 @@ vae.summary()
 x_train = x_train.astype('float32')[:, None, :, :] / 255.
 x_test = x_test.astype('float32')[:, None, :, :] / 255.
 
+print(z_mean_prior.W.get_value()) # make sure the mean is actually optimised!
 vae.fit(x_train, x_train,
         shuffle=True,
         nb_epoch=nb_epoch,
         batch_size=batch_size,
         validation_data=(x_test, x_test))
+print(z_mean_prior.W.get_value())
 
 
 # build a model to project inputs on the latent space
